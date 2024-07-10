@@ -1,0 +1,200 @@
+---
+- name: Setting up CMS Application on AWS EC2 instance
+  hosts: all
+  become: yes
+  gather_facts: yes
+  remote_user: ubuntu
+
+  # Step 1 --> Installing and Updating packages
+  tasks:
+    - name: "Update Repository cache"
+      apt:
+        update_cache: true
+        cache_valid_time: 3600
+        force_apt_get: true
+
+    - name: Installing python3 venv
+      ansible.builtin.apt:
+        name: python3-venv
+        state: present
+
+    - name: Installing MySQL server
+      ansible.builtin.apt:
+        name: mysql-server
+        state: present
+
+    - name: Installing Python3 pip
+      ansible.builtin.apt:
+        name: python3-pip
+        state: present
+    
+    - name: Installing other dependencies
+      ansible.builtin.apt:
+        name: 
+          - libmysqlclient-dev
+          - python3-dev
+          - build-essential
+          - libssl-dev
+          - libffi-dev
+          - python3-setuptools
+          - pkg-config
+      become: true
+        
+
+    # Step2 -->  Database setup for the CMS Application
+    - name: Install build dependencies for mysqlclient
+      ansible.builtin.apt:
+        name:
+          - libmysqlclient-dev
+          - build-essential
+          - libssl-dev
+          - libffi-dev
+          - python3-dev
+          - pkg-config
+      become: true
+
+    - name: Install MySQL Python module
+      ansible.builtin.apt:
+        name: python3-mysqldb
+        state: present
+      become: true
+
+    - name: Create new databases with name cardb
+      community.mysql.mysql_db:
+        name:
+          - cardb
+        state: present
+
+    - name: Copy file cardb.sql to remote hosts
+      ansible.builtin.copy:
+        src: /home/lokesh/Desktop/Decode/CMS/cardb.sql
+        dest: /home/ubuntu/
+      become: true
+
+    - name: Import Database Schema
+      shell: "sudo mysql cardb < cardb.sql"
+      become_user: root
+
+    - name: Update MySQL User Password
+      shell: "sudo mysql -e 'ALTER USER \"root\"@\"localhost\" IDENTIFIED WITH mysql_native_password BY \"root\";'"
+      become_user: root
+
+    - name: Print Database Setup Completed Message
+      ansible.builtin.debug:
+        msg: "Database setup completed successfully."
+
+    # Step3 -> Cloning CMS From Github
+
+    - name: Create CMS directory
+      ansible.builtin.file:
+        path: /home/ubuntu/CMS
+        state: directory
+
+    - name: Clone a github repository
+      ansible.builtin.git:
+        repo: https://github.com/lokeshdangii/CMS.git
+        dest: /home/ubuntu/CMS
+        clone: yes
+        update: yes
+
+    # Creating a Python Virtual Environment
+    - name: Create Python Virtual Environment
+      become: yes
+      command: python3 -m venv env
+      args:
+        chdir: /home/ubuntu/CMS
+
+    # Activating the virtualenv and installing packages
+    - name: Activate virtualenv and install requirements
+      ansible.builtin.shell:
+        cmd: |
+          source /home/ubuntu/CMS/env/bin/activate && \
+          pip install -r requirements.txt && \
+          pip install wheel && \
+          pip install gunicorn flask
+        executable: /bin/bash
+      become: yes
+      args:
+        chdir: /home/ubuntu/CMS
+
+    # Copy file wsgi.py to remote hosts CMS directory 
+    - name: Create the wsgi entry point
+      ansible.builtin.copy:
+        src: /home/lokesh/Desktop/Decode/AWS_Script/Gunicorn/wsgi.py
+        dest: /home/ubuntu/CMS
+      become: true
+
+    # systemd unit file --> cms.service
+    - name: CMS Service configuration
+      ansible.builtin.copy:
+        src: /home/lokesh/Desktop/Decode/AWS_Script/Gunicorn/cms.service
+        dest: /etc/systemd/system/
+      become: true
+
+    # changing the group associated with home directory because the Nginx www-data user won’t be able to read files in your home directory by default
+    - name: Change group ownership of /home/ubuntu to www-data
+      ansible.builtin.file:
+        path: /home/ubuntu
+        state: directory
+        owner: ubuntu
+        group: www-data
+        recurse: true
+      become: true
+
+    # Reload the systemd manager configuration to pick up the changes:
+    - name: Reload systemd manager configuration
+      ansible.builtin.systemd:
+        daemon_reload: yes
+      become: true
+
+    # start the uWSGI created service --> cms.service :
+    - name: Start the CMS service
+      ansible.builtin.systemd:
+        name: cms
+        state: started
+      become: true
+
+    # enable it so that it starts at boot:
+    - name: Enable the CMS service
+      ansible.builtin.systemd:
+        name: cms
+        enabled: yes
+      become: true
+
+    - name: Print CMS Service Setup Completed 
+      ansible.builtin.debug:
+        msg: "CMS Service started successfully."
+
+
+# nginx setup
+
+    - name: Install Nginx
+      ansible.builtin.apt:
+        name: nginx
+        state: present
+      become: yes
+
+    - name: Copy Nginx configuration file
+      ansible.builtin.copy:
+        src: /home/lokesh/Desktop/Decode/AWS_Script/Gunicorn/cms
+        dest: /etc/nginx/sites-available/
+        mode: '0644'
+      become: yes
+
+    - name: Create a symbolic link to enable the configuration using command module
+      ansible.builtin.command: ln -s /etc/nginx/sites-available/cms /etc/nginx/sites-enabled/
+      become: yes
+
+    - name: Unlink the default one
+      ansible.builtin.command: unlink /etc/nginx/sites-enabled/default
+      become: yes
+
+    - name: Restart Nginx
+      ansible.builtin.systemd:
+        name: nginx
+        state: restarted
+      become: yes
+
+    - name: Print Nginx Setup Completed 
+      ansible.builtin.debug:
+        msg: "CMS application is served successfully on nginx. Access the application by server public IP Address"
